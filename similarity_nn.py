@@ -1,10 +1,13 @@
 """
-قدم ۳: الگوریتم شباهت‌یابی با شبکه عصبی (MLP)
-مطابق با مشخصات پروژه کارآموزی و بازخورد کارفرما:
-- داده‌های ورودی به شبکه، مقادیر عددی (نقاط) هستند که از بازه‌های پایگاه‌داده انتخاب شده‌اند.
-- پایگاه‌داده دارای ۱۰۰ سطر و ۳ ویژگی برداری بازه‌ای است.
-- مدل شبکه عصبی (MLP) وظیفه یادگیری وزن‌ها و الگوی شباهت بین داده ورودی و سطرهای پایگاه‌داده را بر عهده دارد.
-- ۳ سطر با بیشترین شباهت به همراه درصد احتمال شباهت هر یک استخراج و ذخیره می‌شوند.
+قدم ۳: الگوریتم شباهت‌یابی با شبکه عصبی (حل گلوگاه ورودی با طول متغیر)
+مطابق با بازخورد کارفرما:
+۱. از محاسبه دستی شباهت قبل از شبکه و سرچ خطی روی پایگاه‌داده خودداری شده است.
+۲. از تبدیل داده به پارامترهای آماری (مانند میانگین، انحراف معیار، F1 و ...) خودداری شده است.
+۳. گلوگاه ورودی داده با طول متغیر از طریق رویکرد اصیل شبکه‌های عصبی عمیق:
+   «پدینگ با ظرفیت ماکزیمم همراه با بردار ماسک اعتبار (Padding & Validity Masking)»
+   حل شده است.
+۴. داده ورودی مستقیماً و یک‌باره وارد شبکه عصبی شده و خروجی Softmax آن توزیع احتمال شباهت
+   روی ۱۰۰ سطر پایگاه‌داده را فراهم می‌کند و ۳ سطر با بیشترین شباهت استخراج می‌گردند.
 """
 
 import numpy as np
@@ -12,17 +15,25 @@ import pandas as pd
 from typing import List, Tuple, Dict, Any
 from sklearn.neural_network import MLPClassifier
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+from sklearn.metrics import accuracy_score
 import json
 import warnings
 
 warnings.filterwarnings("ignore")
 np.random.seed(42)
 
+# ==============================================================================
+# ۱. مشخصات بازه‌ها و محدوده‌های فیزیکی داده‌ها
+# ==============================================================================
 
-# ==============================================================================
-# ۱. توابع پردازش بازه‌ها و داده‌های ورودی نقطه‌ای
-# ==============================================================================
+MAX_LEN_F1 = 10
+MAX_LEN_F2 = 20
+MAX_LEN_F3 = 5
+
+MIN_VAL_F1, MAX_VAL_F1 = 1000.0, 10000.0
+MIN_VAL_F2, MAX_VAL_F2 = 20000.0, 100000.0
+MIN_VAL_F3, MAX_VAL_F3 = 0.1, 1000.0
+
 
 def parse_intervals(interval_str: str) -> List[Tuple[float, float]]:
     """تبدیل رشته بازه‌ها در پایگاه‌داده به لیست تاپل‌های (start, end)"""
@@ -41,10 +52,7 @@ def parse_intervals(interval_str: str) -> List[Tuple[float, float]]:
 
 
 def parse_query_points(query_dict: Dict, feature_name: str) -> List[float]:
-    """
-    استخراج مقادیر عددی (نقاط) داده ورودی برای یک ویژگی
-    (پشتیبانی از هر دو فرمت لیست عددی و رشته کاما-جدا)
-    """
+    """استخراج مقادیر عددی ورودی برای یک ویژگی"""
     values_key = f"{feature_name}_values"
     if values_key in query_dict and isinstance(query_dict[values_key], list):
         return [float(x) for x in query_dict[values_key]]
@@ -62,138 +70,78 @@ def parse_query_points(query_dict: Dict, feature_name: str) -> List[float]:
                 except ValueError:
                     continue
         return pts
-    
     return []
 
 
 # ==============================================================================
-# ۲. فرمول‌بندی تطابق نقطه با بازه (Point-to-Interval Matching)
+# ۲. حل گلوگاه ورودی با طول متغیر در شبکه عصبی: رویکرد Padding & Masking
 # ==============================================================================
 
-def point_interval_metrics(point: float, interval: Tuple[float, float], sigma: float = 0.01) -> Tuple[float, float]:
+def encode_feature_vector(points: List[float], max_len: int, min_val: float, max_val: float) -> Tuple[List[float], List[float]]:
     """
-    محاسبه فاصله نسبی و امتیاز عضویت نرم نقطه در بازه با در نظر گرفتن تلرانس خطای ۱٪:
-    - اگر نقطه درون بازه باشد: فاصله نسبی صفر و شباهت ۱.۰ است.
-    - اگر خارج از بازه باشد: فاصله نسبی نسبت به مرز بازه محاسبه می‌شود.
-    - شباهت نرم از تابع گاوسی با انحراف معیار sigma=0.01 (منطبق بر ۱٪ نویز مجاز) پیروی می‌کند.
+    نرمال‌سازی داده خام و ساخت بردار پدینگ همراه با بردار ماسک اعتبار:
+    - مقادیر خام مستقیماً به بازه [0, 1] نرمال می‌شوند (بدون تبدیل به آماره‌هایی مثل میانگین یا انحراف معیار).
+    - آرایه تا طول ماکزیمم با مقدار 0.0 پد می‌شود (Padding).
+    - یک بردار ماسک دودویی هم‌طول ایجاد می‌شود: ۱ برای داده‌های واقعی و ۰ برای موقعیت‌های پدشده (Validity Mask).
     """
-    s, e = interval
-    if s <= point <= e:
-        rel_dist = 0.0
-    elif point < s:
-        rel_dist = (s - point) / s if s != 0 else abs(s - point)
-    else:
-        rel_dist = (point - e) / e if e != 0 else abs(point - e)
+    if not points:
+        return [0.0] * max_len, [0.0] * max_len
     
-    # تلرانس خطای ۱٪ (نویز مجاز بند ۳ PDF)
-    if rel_dist <= 0.005:
-        sim = 1.0
-    else:
-        sim = float(np.exp(-0.5 * (rel_dist / sigma) ** 2))
+    # مرتب‌سازی نقاط برای حفظ یکپارچگی ساختار ترتیب بازه‌ها
+    sorted_pts = sorted(points)
     
-    return rel_dist, sim
+    # نرمال‌سازی داده‌ها بر اساس محدوده فیزیکی دامنه
+    span = max_val - min_val
+    norm_pts = [(x - min_val) / span for x in sorted_pts]
+    
+    actual_len = len(norm_pts)
+    pad_len = max(0, max_len - actual_len)
+    
+    values = norm_pts[:max_len] + [0.0] * pad_len
+    mask = [1.0] * min(actual_len, max_len) + [0.0] * pad_len
+    
+    return values, mask
 
 
-def compute_feature_match(points: List[float], intervals: List[Tuple[float, float]]) -> Tuple[float, float, float, float]:
+def encode_variable_length_query(q1: List[float], q2: List[float], q3: List[float]) -> np.ndarray:
     """
-    محاسبه ویژگی‌های تطابق بردار اعداد ورودی با بردار بازه‌های پایگاه‌داده:
-    1. Precision (نرخ برخورد): چه درصدی از نقاط ورودی با بازه‌های سطر همخوانی دارند.
-    2. Recall (نرخ پوشش): چه درصدی از بازه‌های سطر توسط نقاط ورودی پوشش داده شده‌اند.
-    3. F1-Score: میانگین هارمونیک دقت و پوشش.
-    4. AvgDistance: میانگین حداقل فاصله نسبی نقاط ورودی از بازه‌های سطر.
+    تبدیل ورودی با طول متغیر به تنسور ورودی ثابت با استفاده از ایده Padding و Masking:
+    - ورودی خام ویژگی ۱ (حداکثر ۱۰ عضو) + ماسک اعتبار (۱۰ عضو)
+    - ورودی خام ویژگی ۲ (حداکثر ۲۰ عضو) + ماسک اعتبار (۲۰ عضو)
+    - ورودی خام ویژگی ۳ (حداکثر ۵ عضو) + ماسک اعتبار (۵ عضو)
+    مجموعاً یک بردار ۷۰ بعدی شامل ۳۵ مقدار نرمال‌شده و ۳۵ مقدار ماسک اعتبارسنجی
     """
-    if not points or not intervals:
-        return 0.0, 0.0, 0.0, 1.0
+    v1, m1 = encode_feature_vector(q1, MAX_LEN_F1, MIN_VAL_F1, MAX_VAL_F1)
+    v2, m2 = encode_feature_vector(q2, MAX_LEN_F2, MIN_VAL_F2, MAX_VAL_F2)
+    v3, m3 = encode_feature_vector(q3, MAX_LEN_F3, MIN_VAL_F3, MAX_VAL_F3)
     
-    # ۱. ارزیابی تطابق هر نقطه با بهترین بازه ممکن
-    point_sims = []
-    point_dists = []
-    for p in points:
-        best_sim = 0.0
-        best_dist = float("inf")
-        for inv in intervals:
-            d, s = point_interval_metrics(p, inv)
-            if s > best_sim:
-                best_sim = s
-            if d < best_dist:
-                best_dist = d
-        point_sims.append(best_sim)
-        point_dists.append(best_dist)
-    
-    precision = float(np.mean(point_sims))
-    avg_dist = float(np.mean(point_dists))
-    
-    # ۲. ارزیابی پوشش بازه‌ها توسط نقاط ورودی
-    interval_sims = []
-    for inv in intervals:
-        best_sim = 0.0
-        for p in points:
-            _, s = point_interval_metrics(p, inv)
-            if s > best_sim:
-                best_sim = s
-        interval_sims.append(best_sim)
-    
-    recall = float(np.mean(interval_sims))
-    f1 = float((2.0 * precision * recall) / (precision + recall + 1e-8))
-    
-    return precision, recall, f1, avg_dist
-
-
-def compute_pair_features(query_points_tuple: Tuple[List[float], List[float], List[float]], 
-                          db_row_tuple: Tuple[List[Tuple[float, float]], List[Tuple[float, float]], List[Tuple[float, float]]]) -> List[float]:
-    """
-    استخراج بردار ورودی ۱۲ بعدی نرمال‌شده برای ورودی به شبکه عصبی MLP:
-    شامل [F1, Precision, Recall, Distance] برای هر یک از ۳ ویژگی (Feature1, Feature2, Feature3)
-    """
-    q1, q2, q3 = query_points_tuple
-    d1, d2, d3 = db_row_tuple
-    
-    p1, r1, f1, dist1 = compute_feature_match(q1, d1)
-    p2, r2, f2, dist2 = compute_feature_match(q2, d2)
-    p3, r3, f3, dist3 = compute_feature_match(q3, d3)
-    
-    return [f1, p1, r1, dist1, f2, p2, r2, dist2, f3, p3, r3, dist3]
+    full_vector = v1 + v2 + v3 + m1 + m2 + m3
+    return np.array(full_vector, dtype=np.float32)
 
 
 # ==============================================================================
-# ۳. تولید داده آموزشی جهت یادگیری شبکه عصبی
+# ۳. تولید داده آموزشی جهت یادگیری بازنمایی سطرهای پایگاه‌داده
 # ==============================================================================
 
-def sample_query_points_from_intervals(intervals: List[Tuple[float, float]], 
-                                       drop_prob: float = 0.30, 
-                                       noise_rate: float = 0.01) -> List[float]:
-    """
-    تولید بردار اعداد از بازه‌ها دقیقا منطبق بر قوانین مرحله ۲:
-    ۱. انتخاب عدد تصادفی از درون هر بازه
-    ۲. احتمال ۳۰٪ حذف یک عضو
-    ۳. اعمال خطای تصادفی ۱٪
-    """
+def sample_query_points(intervals: List[Tuple[float, float]], drop_prob: float = 0.30, noise_rate: float = 0.01) -> List[float]:
+    """تولید نمونه عددی از بازه‌ها مطابق قوانین PDF (انتخاب از بازه، ۳۰٪ حذف، ۱٪ نویز)"""
     if not intervals:
         return []
-    
-    # انتخاب عدد از هر بازه
     pts = [float(np.random.uniform(s, e)) for s, e in intervals]
-    
-    # حذف تصادفی با شانس ۳۰٪
     if len(pts) > 1 and np.random.random() < drop_prob:
         drop_idx = np.random.randint(0, len(pts))
         pts.pop(drop_idx)
-    
-    # اعمال خطای ۱٪
     noisy_pts = [p * (1.0 + np.random.uniform(-noise_rate, noise_rate)) for p in pts]
     return noisy_pts
 
 
-def generate_training_data(df: pd.DataFrame, n_samples: int = 3000) -> Tuple[np.ndarray, np.ndarray]:
+def generate_training_data(df: pd.DataFrame, samples_per_class: int = 60) -> Tuple[np.ndarray, np.ndarray]:
     """
-    تولید دیتاست آموزشی برای شبکه عصبی:
-    - نمونه‌های مثبت (برچسب ۱): کوئری ساخته‌شده از سطر i + همان سطر i در پایگاه‌داده
-    - نمونه‌های منفی تصادفی (برچسب ۰): کوئری ساخته‌شده از سطر i + سطر تصادفی j (که j != i)
-    - نمونه‌های منفی دشوار (Hard Negatives): کوئری سطر i + سطرهایی که همپوشانی جزئی با سطر i دارند
+    تولید داده‌های آموزشی برای یادگیری مستقیم ۱۰۰ سطر پایگاه‌داده توسط شبکه:
+    به ازای هر سطر از ۱۰۰ سطر پایگاه‌داده، ۶۰ نمونه کوئری با شرایط واقعی (طول متغیر، نویز و حذف عضو)
+    تولید شده و به تنسورهای ورودی همراه با ماسک اعتبار تبدیل می‌شوند.
+    مجموعاً ۶۰۰۰ نمونه آموزشی برای ۱۰۰ کلاس.
     """
-    n_rows = len(df)
-    
-    # پیش‌پردازش تمام بازه‌های پایگاه‌داده
     parsed_db = []
     for _, row in df.iterrows():
         parsed_db.append((
@@ -202,132 +150,110 @@ def generate_training_data(df: pd.DataFrame, n_samples: int = 3000) -> Tuple[np.
             parse_intervals(row["Feature3"])
         ))
     
+    n_rows = len(df)
     X = []
     y = []
     
-    for _ in range(n_samples):
-        # انتخاب تصادفی یک سطر منبع
-        src_idx = np.random.randint(0, n_rows)
-        d1, d2, d3 = parsed_db[src_idx]
-        
-        # تولید داده ورودی نقطه‌ای از این سطر
-        q1 = sample_query_points_from_intervals(d1)
-        q2 = sample_query_points_from_intervals(d2)
-        q3 = sample_query_points_from_intervals(d3)
-        query_points = (q1, q2, q3)
-        
-        # ۱. ساخت نمونه مثبت (کوئری با سطر واقعی خود) -> برچسب ۱
-        pos_features = compute_pair_features(query_points, (d1, d2, d3))
-        X.append(pos_features)
-        y.append(1)
-        
-        # ۲. ساخت نمونه منفی تصادفی -> برچسب ۰
-        neg_idx = np.random.randint(0, n_rows)
-        while neg_idx == src_idx:
-            neg_idx = np.random.randint(0, n_rows)
-        
-        neg_features = compute_pair_features(query_points, parsed_db[neg_idx])
-        X.append(neg_features)
-        y.append(0)
+    for row_idx in range(n_rows):
+        d1, d2, d3 = parsed_db[row_idx]
+        for _ in range(samples_per_class):
+            q1 = sample_query_points(d1)
+            q2 = sample_query_points(d2)
+            q3 = sample_query_points(d3)
+            
+            x_vec = encode_variable_length_query(q1, q2, q3)
+            X.append(x_vec)
+            y.append(row_idx)
     
-    return np.array(X, dtype=np.float32), np.array(y, dtype=np.int32)
+    X = np.array(X, dtype=np.float32)
+    y = np.array(y, dtype=np.int32)
+    return X, y
 
 
 # ==============================================================================
-# ۴. ساخت و آموزش شبکه عصبی MLP
+# ۴. معماری و آموزش شبکه عصبی
 # ==============================================================================
 
-def train_model(X: np.ndarray, y: np.ndarray) -> MLPClassifier:
+def train_neural_network(X: np.ndarray, y: np.ndarray) -> MLPClassifier:
     """
-    آموزش شبکه عصبی MLP برای ارزیابی شباهت:
-    - لایه ورودی: ۱۲ ویژگی تطابق استخراج‌شده
-    - لایه‌های مخفی: (64, 32) نورون با فعال‌ساز ReLU
-    - بهینه‌ساز: Adam با توقف زودهنگام (Early Stopping)
+    آموزش شبکه عصبی MLP برای نگاشت مستقیم داده ورودی به سطرهای پایگاه‌داده:
+    - ورودی: ۷۰ گره (۳۵ داده نرمال‌شده + ۳۵ ماسک اعتبارسنجی)
+    - لایه‌های مخفی: لایه اول ۲۵۶ نورون، لایه دوم ۱۲۸ نورون با فعال‌ساز ReLU
+    - خروجی: ۱۰۰ نورون با تابع Softmax (احتمال تعلق به هر یک از ۱۰۰ سطر)
+    - بهینه‌ساز: Adam همراه با Early Stopping جهت جلوگیری از بیش‌برازش
     """
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.20, random_state=42, stratify=y
     )
     
     model = MLPClassifier(
-        hidden_layer_sizes=(64, 32),
+        hidden_layer_sizes=(256, 128),
         activation="relu",
         solver="adam",
         learning_rate_init=0.001,
-        max_iter=300,
+        max_iter=350,
         random_state=42,
         early_stopping=True,
         validation_fraction=0.10,
         n_iter_no_change=15
     )
     
-    print("⏳ در حال آموزش شبکه عصبی MLP...")
+    print("⏳ در حال آموزش شبکه عصبی عمیق روی ورودی‌های طول متغیر (Padding + Masking)...")
     model.fit(X_train, y_train)
     
-    y_pred_train = model.predict(X_train)
-    y_pred_test = model.predict(X_test)
-    y_prob_test = model.predict_proba(X_test)[:, 1]
+    # ارزیابی
+    train_acc = accuracy_score(y_train, model.predict(X_train))
+    test_acc = accuracy_score(y_test, model.predict(X_test))
     
-    print("\n📊 نتایج ارزیابی عملکرد شبکه عصبی:")
-    print("-" * 50)
-    print(f"✅ دقت روی داده‌های آموزش (Train Accuracy): {accuracy_score(y_train, y_pred_train)*100:.2f}%")
-    print(f"✅ دقت روی داده‌های آزمون (Test Accuracy) : {accuracy_score(y_test, y_pred_test)*100:.2f}%")
-    print(f"✅ معیار Precision روی داده‌های آزمون    : {precision_score(y_test, y_pred_test)*100:.2f}%")
-    print(f"✅ معیار Recall روی داده‌های آزمون       : {recall_score(y_test, y_pred_test)*100:.2f}%")
-    print(f"✅ معیار F1-Score روی داده‌های آزمون     : {f1_score(y_test, y_pred_test)*100:.2f}%")
-    print(f"✅ شاخص تفکیک‌پذیری ROC-AUC             : {roc_auc_score(y_test, y_prob_test):.4f}")
-    print("-" * 50)
+    test_probs = model.predict_proba(X_test)
+    top3_acc = np.mean([y_test[i] in np.argsort(test_probs[i])[-3:] for i in range(len(y_test))])
+    
+    print("\n📊 نتایج ارزیابی شبکه عصبی روی داده‌های آزمون (داده‌های کاملاً جدید):")
+    print("-" * 55)
+    print(f"✅ دقت آموزش (Train Accuracy)     : {train_acc * 100:.2f}%")
+    print(f"✅ دقت پیش‌بینی دقیق (Top-1 Accuracy): {test_acc * 100:.2f}%")
+    print(f"✅ دقت در ۳ سطر برتر (Top-3 Accuracy): {top3_acc * 100:.2f}%")
+    print("-" * 55)
     
     return model
 
 
 # ==============================================================================
-# ۵. جستجو و استخراج ۳ سطر با بیشترین شباهت
+# ۵. استنتاج و استخراج ۳ سطر با بیشترین شباهت (بدون سرچ در پایگاه‌داده)
 # ==============================================================================
 
 def find_top3(query: Dict, df: pd.DataFrame, model: MLPClassifier) -> List[Dict[str, Any]]:
     """
-    مقایسه داده ورودی عددی با تمامی ۱۰۰ سطر پایگاه‌داده و استخراج ۳ سطر برتر به همراه احتمال شباهت
+    استخراج ۳ سطر با بیشترین شباهت از طریق یک‌بار ارسال داده ورودی به شبکه عصبی:
+    هیچ‌گونه حلقه سرچ یا مقایسه دستی با پایگاه‌داده انجام نمی‌شود!
+    شبکه عصبی مستقیماً احتمال تعلق به تک‌تک ۱۰۰ سطر را در قالب توزیع Softmax برمی‌گرداند.
     """
     q1 = parse_query_points(query, "Feature1")
     q2 = parse_query_points(query, "Feature2")
     q3 = parse_query_points(query, "Feature3")
-    query_points = (q1, q2, q3)
+    
+    # تبدیل داده ورودی به بردار ۷۰ بعدی (مقادیر + ماسک)
+    x_input = encode_variable_length_query(q1, q2, q3)
+    
+    # ارسال به شبکه عصبی (One-pass Inference)
+    probs = model.predict_proba([x_input])[0]
+    
+    # استخراج ۳ اندیس با بیشترین احتمال
+    top3_indices = np.argsort(probs)[-3:][::-1]
     
     results = []
-    
-    for idx, row in df.iterrows():
-        d1 = parse_intervals(row["Feature1"])
-        d2 = parse_intervals(row["Feature2"])
-        d3 = parse_intervals(row["Feature3"])
-        db_tuple = (d1, d2, d3)
-        
-        # استخراج ویژگی‌های تطابق
-        pair_feats = compute_pair_features(query_points, db_tuple)
-        
-        # محاسبه احتمال تعلق به کلاس شباهت کامل (کلاس ۱)
-        proba = float(model.predict_proba([pair_feats])[0][1])
-        
+    for rank, idx in enumerate(top3_indices, 1):
+        row = df.iloc[idx]
         results.append({
+            "rank": rank,
             "row_id": int(idx),
-            "probability": proba,
-            "f1_feature1": round(pair_feats[0], 4),
-            "precision_feature1": round(pair_feats[1], 4),
-            "recall_feature1": round(pair_feats[2], 4),
-            "f1_feature2": round(pair_feats[4], 4),
-            "precision_feature2": round(pair_feats[5], 4),
-            "recall_feature2": round(pair_feats[6], 4),
-            "f1_feature3": round(pair_feats[8], 4),
-            "precision_feature3": round(pair_feats[9], 4),
-            "recall_feature3": round(pair_feats[10], 4),
+            "probability": float(probs[idx]),
             "Feature1": row["Feature1"],
             "Feature2": row["Feature2"],
             "Feature3": row["Feature3"],
         })
     
-    # مرتب‌سازی بر اساس احتمال شباهت (نزولی)
-    results.sort(key=lambda item: item["probability"], reverse=True)
-    
-    return results[:3]
+    return results
 
 
 # ==============================================================================
@@ -336,7 +262,8 @@ def find_top3(query: Dict, df: pd.DataFrame, model: MLPClassifier) -> List[Dict[
 
 if __name__ == "__main__":
     print("=" * 75)
-    print("🚀 قدم ۳: شباهت‌یابی در پایگاه‌داده با شبکه عصبی بر اساس داده ورودی نقطه‌ای")
+    print("🚀 قدم ۳: شباهت‌یابی مستقیم با شبکه عصبی بر روی داده‌های با طول متغیر")
+    print("   (رویکرد Padding + Masking بدون استفاده از پارامترهای آماری یا سرچ دستی)")
     print("=" * 75)
     
     # بارگذاری پایگاه‌داده
@@ -344,15 +271,15 @@ if __name__ == "__main__":
     df = pd.read_pickle("database.pkl")
     print(f"   تعداد سطرهای موجود در پایگاه‌داده: {len(df)}")
     
-    # تولید داده‌های آموزشی
-    print("\n📊 تولید ۳۰۰۰ نمونه داده آموزشی (زوج‌های مثبت و منفی)...")
-    X, y = generate_training_data(df, n_samples=3000)
-    print(f"   ابعاد ماتریس داده‌های آموزشی X: {X.shape} | برچسب‌ها y: {y.shape}")
+    # تولید داده آموزشی
+    print("\n📊 تولید داده‌های آموزشی (۶۰ نمونه برای هر یک از ۱۰۰ سطر = ۶۰۰۰ نمونه)...")
+    X, y = generate_training_data(df, samples_per_class=60)
+    print(f"   ابعاد ماتریس ورودی X: {X.shape} (شامل ۳۵ داده نرمال‌شده + ۳۵ ماسک) | برچسب‌ها y: {y.shape}")
     
-    # آموزش مدل شبکه عصبی
-    model = train_model(X, y)
+    # آموزش شبکه عصبی
+    model = train_neural_network(X, y)
     
-    # بارگذاری داده دریافتی (query)
+    # بارگذاری داده دریافتی (query.json)
     print("\n📥 بارگذاری داده ورودی به شبکه (query.json)...")
     with open("query.json", "r", encoding="utf-8") as f:
         query = json.load(f)
@@ -362,21 +289,21 @@ if __name__ == "__main__":
     print(f"   داده‌های عددی Feature2   : {str(query.get('Feature2'))[:75]}...")
     print(f"   داده‌های عددی Feature3   : {str(query.get('Feature3'))}")
     
-    # جستجوی ۳ سطر برتر
-    print("\n🔍 در حال جستجو و ارزیابی شباهت بین داده ورودی و ۱۰۰ سطر پایگاه‌داده...")
+    # استنتاج مستقیم توسط شبکه عصبی
+    print("\n🔍 در حال محاسبه احتمالات خروجی شبکه عصبی (توزیع Softmax روی ۱۰۰ کلاس)...")
     top3 = find_top3(query, df, model)
     
     # نمایش نتایج
     print("\n" + "=" * 75)
-    print("🏆 ۳ سطر از پایگاه‌داده با بیشترین میزان شباهت و احتمال تعلق:")
+    print("🏆 ۳ سطر برتر پیش‌بینی‌شده توسط شبکه عصبی به همراه احتمال شباهت:")
     print("=" * 75)
     
-    for rank, item in enumerate(top3, 1):
-        print(f"\n🥇 رتبه {rank}: سطر شماره {item['row_id']}")
-        print(f"   درصد احتمال شباهت   : {item['probability'] * 100:.2f}%")
-        print(f"   تطابق ویژگی ۱ (F1)  : {item['f1_feature1']:.4f} (دقت: {item['precision_feature1']:.3f} | پوشش: {item['recall_feature1']:.3f})")
-        print(f"   تطابق ویژگی ۲ (F1)  : {item['f1_feature2']:.4f} (دقت: {item['precision_feature2']:.3f} | پوشش: {item['recall_feature2']:.3f})")
-        print(f"   تطابق ویژگی ۳ (F1)  : {item['f1_feature3']:.4f} (دقت: {item['precision_feature3']:.3f} | پوشش: {item['recall_feature3']:.3f})")
+    for item in top3:
+        print(f"\n🥇 رتبه {item['rank']}: سطر شماره {item['row_id']}")
+        print(f"   درصد احتمال شباهت (Softmax Probability): {item['probability'] * 100:.2f}%")
+        print(f"   بازه‌های Feature1 در پایگاه‌داده: {item['Feature1'][:75]}...")
+        print(f"   بازه‌های Feature2 در پایگاه‌داده: {item['Feature2'][:75]}...")
+        print(f"   بازه‌های Feature3 در پایگاه‌داده: {item['Feature3']}")
     
     # ذخیره نتایج در فایل JSON
     with open("top3_results.json", "w", encoding="utf-8") as f:
