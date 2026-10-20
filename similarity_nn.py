@@ -1,21 +1,21 @@
 """
-قدم ۳: الگوریتم شباهت‌یابی با شبکه عصبی (حل گلوگاه ورودی با طول متغیر)
-مطابق با بازخورد کارفرما:
-۱. از محاسبه دستی شباهت قبل از شبکه و سرچ خطی روی پایگاه‌داده خودداری شده است.
-۲. از تبدیل داده به پارامترهای آماری (مانند میانگین، انحراف معیار، F1 و ...) خودداری شده است.
-۳. گلوگاه ورودی داده با طول متغیر از طریق رویکرد اصیل شبکه‌های عصبی عمیق:
-   «پدینگ با ظرفیت ماکزیمم همراه با بردار ماسک اعتبار (Padding & Validity Masking)»
-   حل شده است.
-۴. داده ورودی مستقیماً و یک‌باره وارد شبکه عصبی شده و خروجی Softmax آن توزیع احتمال شباهت
-   روی ۱۰۰ سطر پایگاه‌داده را فراهم می‌کند و ۳ سطر با بیشترین شباهت استخراج می‌گردند.
+قدم ۳: آموزش شبکه عصبی و ارزیابی عملکرد (حل گلوگاه ورودی طول متغیر با Padding & Masking)
+مطابق با آخرین اصلاحات کارفرما:
+۱. هر یک از اعضای بردار ویژگی به طور مستقل با احتمال ۳۰٪ می‌تواند مفقود باشد (Independent Dropout).
+۲. ذخیره‌سازی وزن‌های مدل آموزش‌دیده در فایل trained_model.joblib جهت استفاده مستقیم در اسکریپت مجزای inference.py.
+۳. رسم و ذخیره نمودارهای ارزیابی دقت آموزش و آزمون (accuracy_evaluation_plot.png).
 """
 
+import os
+os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib_cache"
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from typing import List, Tuple, Dict, Any
 from sklearn.neural_network import MLPClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
+import joblib
 import json
 import warnings
 
@@ -23,7 +23,7 @@ warnings.filterwarnings("ignore")
 np.random.seed(42)
 
 # ==============================================================================
-# ۱. مشخصات بازه‌ها و محدوده‌های فیزیکی داده‌ها
+# ۱. مشخصات بازه‌ها و محدوده‌های فیزیکی ویژگی‌ها
 # ==============================================================================
 
 MAX_LEN_F1 = 10
@@ -74,23 +74,15 @@ def parse_query_points(query_dict: Dict, feature_name: str) -> List[float]:
 
 
 # ==============================================================================
-# ۲. حل گلوگاه ورودی با طول متغیر در شبکه عصبی: رویکرد Padding & Masking
+# ۲. انکودر ورودی طول متغیر با رویکرد پدینگ و ماسک اعتبار (Padding & Masking)
 # ==============================================================================
 
 def encode_feature_vector(points: List[float], max_len: int, min_val: float, max_val: float) -> Tuple[List[float], List[float]]:
-    """
-    نرمال‌سازی داده خام و ساخت بردار پدینگ همراه با بردار ماسک اعتبار:
-    - مقادیر خام مستقیماً به بازه [0, 1] نرمال می‌شوند (بدون تبدیل به آماره‌هایی مثل میانگین یا انحراف معیار).
-    - آرایه تا طول ماکزیمم با مقدار 0.0 پد می‌شود (Padding).
-    - یک بردار ماسک دودویی هم‌طول ایجاد می‌شود: ۱ برای داده‌های واقعی و ۰ برای موقعیت‌های پدشده (Validity Mask).
-    """
+    """نرمال‌سازی داده خام و ساخت بردار پدینگ به همراه بردار ماسک اعتبار دودویی"""
     if not points:
         return [0.0] * max_len, [0.0] * max_len
     
-    # مرتب‌سازی نقاط برای حفظ یکپارچگی ساختار ترتیب بازه‌ها
     sorted_pts = sorted(points)
-    
-    # نرمال‌سازی داده‌ها بر اساس محدوده فیزیکی دامنه
     span = max_val - min_val
     norm_pts = [(x - min_val) / span for x in sorted_pts]
     
@@ -99,49 +91,43 @@ def encode_feature_vector(points: List[float], max_len: int, min_val: float, max
     
     values = norm_pts[:max_len] + [0.0] * pad_len
     mask = [1.0] * min(actual_len, max_len) + [0.0] * pad_len
-    
     return values, mask
 
 
 def encode_variable_length_query(q1: List[float], q2: List[float], q3: List[float]) -> np.ndarray:
-    """
-    تبدیل ورودی با طول متغیر به تنسور ورودی ثابت با استفاده از ایده Padding و Masking:
-    - ورودی خام ویژگی ۱ (حداکثر ۱۰ عضو) + ماسک اعتبار (۱۰ عضو)
-    - ورودی خام ویژگی ۲ (حداکثر ۲۰ عضو) + ماسک اعتبار (۲۰ عضو)
-    - ورودی خام ویژگی ۳ (حداکثر ۵ عضو) + ماسک اعتبار (۵ عضو)
-    مجموعاً یک بردار ۷۰ بعدی شامل ۳۵ مقدار نرمال‌شده و ۳۵ مقدار ماسک اعتبارسنجی
-    """
+    """تبدیل ورودی با طول متغیر به تنسور ورودی ثابت ۷۰ بعدی (۳۵ مقدار نرمال‌شده + ۳۵ ماسک)"""
     v1, m1 = encode_feature_vector(q1, MAX_LEN_F1, MIN_VAL_F1, MAX_VAL_F1)
     v2, m2 = encode_feature_vector(q2, MAX_LEN_F2, MIN_VAL_F2, MAX_VAL_F2)
     v3, m3 = encode_feature_vector(q3, MAX_LEN_F3, MIN_VAL_F3, MAX_VAL_F3)
-    
-    full_vector = v1 + v2 + v3 + m1 + m2 + m3
-    return np.array(full_vector, dtype=np.float32)
+    return np.array(v1 + v2 + v3 + m1 + m2 + m3, dtype=np.float32)
 
 
 # ==============================================================================
-# ۳. تولید داده آموزشی جهت یادگیری بازنمایی سطرهای پایگاه‌داده
+# ۳. تولید داده آموزشی با حذف مستقل ۳۰٪ برای هر یک از اعضا
 # ==============================================================================
 
 def sample_query_points(intervals: List[Tuple[float, float]], drop_prob: float = 0.30, noise_rate: float = 0.01) -> List[float]:
-    """تولید نمونه عددی از بازه‌ها مطابق قوانین PDF (انتخاب از بازه، ۳۰٪ حذف، ۱٪ نویز)"""
+    """
+    تولید بردار اعداد نقطه‌ای از بازه‌ها:
+    - هر یک از اعضا به صورت کاملاً مستقل با شانس ۳۰٪ می‌تواند مفقود باشد (Independent Dropout)
+    - اعمال خطای ۱٪ به هر عدد باقی‌مانده
+    """
     if not intervals:
         return []
+    
     pts = [float(np.random.uniform(s, e)) for s, e in intervals]
-    if len(pts) > 1 and np.random.random() < drop_prob:
-        drop_idx = np.random.randint(0, len(pts))
-        pts.pop(drop_idx)
-    noisy_pts = [p * (1.0 + np.random.uniform(-noise_rate, noise_rate)) for p in pts]
+    
+    # اصلاحیه کارفرما: هر عضو مستقلاً ۳۰٪ احتمال حذف دارد
+    kept = [p for p in pts if np.random.random() >= drop_prob]
+    if not kept and pts:
+        kept = [pts[np.random.randint(0, len(pts))]]
+        
+    noisy_pts = [p * (1.0 + np.random.uniform(-noise_rate, noise_rate)) for p in kept]
     return noisy_pts
 
 
-def generate_training_data(df: pd.DataFrame, samples_per_class: int = 60) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    تولید داده‌های آموزشی برای یادگیری مستقیم ۱۰۰ سطر پایگاه‌داده توسط شبکه:
-    به ازای هر سطر از ۱۰۰ سطر پایگاه‌داده، ۶۰ نمونه کوئری با شرایط واقعی (طول متغیر، نویز و حذف عضو)
-    تولید شده و به تنسورهای ورودی همراه با ماسک اعتبار تبدیل می‌شوند.
-    مجموعاً ۶۰۰۰ نمونه آموزشی برای ۱۰۰ کلاس.
-    """
+def generate_training_data(df: pd.DataFrame, samples_per_class: int = 80) -> Tuple[np.ndarray, np.ndarray]:
+    """تولید ۸۰۰۰ نمونه آموزشی (۸۰ نمونه برای هر یک از ۱۰۰ سطر پایگاه‌داده)"""
     parsed_db = []
     for _, row in df.iterrows():
         parsed_db.append((
@@ -164,24 +150,73 @@ def generate_training_data(df: pd.DataFrame, samples_per_class: int = 60) -> Tup
             x_vec = encode_variable_length_query(q1, q2, q3)
             X.append(x_vec)
             y.append(row_idx)
+            
+    return np.array(X, dtype=np.float32), np.array(y, dtype=np.int32)
+
+
+# ==============================================================================
+# ۴. آموزش شبکه عصبی و رسم نمودارهای دقت عملکرد
+# ==============================================================================
+
+def plot_performance_evaluation(model: MLPClassifier, X_train, y_train, X_test, y_test, output_path: str = "accuracy_evaluation_plot.png"):
+    """رسم نمودارهای کامل دقت آموزش و تست (تابع هزینه، منحنی یادگیری و ستون‌های دقت)"""
+    train_acc = accuracy_score(y_train, model.predict(X_train)) * 100.0
+    test_acc = accuracy_score(y_test, model.predict(X_test)) * 100.0
     
-    X = np.array(X, dtype=np.float32)
-    y = np.array(y, dtype=np.int32)
-    return X, y
+    test_probs = model.predict_proba(X_test)
+    top2_acc = np.mean([y_test[i] in np.argsort(test_probs[i])[-2:] for i in range(len(y_test))]) * 100.0
+    top3_acc = np.mean([y_test[i] in np.argsort(test_probs[i])[-3:] for i in range(len(y_test))]) * 100.0
+    top5_acc = np.mean([y_test[i] in np.argsort(test_probs[i])[-5:] for i in range(len(y_test))]) * 100.0
+    
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    
+    # ۱. منحنی همگرایی تابع هزینه آموزش
+    axes[0].plot(model.loss_curve_, color="#1f77b4", lw=2.5, label="Training Loss")
+    axes[0].set_title("Training Loss Convergence Curve", fontsize=11, fontweight="bold")
+    axes[0].set_xlabel("Epochs / Iterations", fontsize=10)
+    axes[0].set_ylabel("Categorical Cross-Entropy", fontsize=10)
+    axes[0].grid(True, linestyle="--", alpha=0.6)
+    axes[0].legend()
+    
+    # ۲. منحنی دقت اعتبارسنجی طی ایپاک‌ها
+    if model.validation_scores_:
+        val_accs = [v * 100.0 for v in model.validation_scores_]
+        axes[1].plot(val_accs, color="#2ca02c", lw=2.5, marker="o", markersize=4, label="Validation Accuracy")
+        axes[1].set_title("Validation Accuracy over Epochs", fontsize=11, fontweight="bold")
+        axes[1].set_xlabel("Epochs", fontsize=10)
+        axes[1].set_ylabel("Accuracy (%)", fontsize=10)
+        axes[1].grid(True, linestyle="--", alpha=0.6)
+        axes[1].legend()
+    else:
+        axes[1].text(0.5, 0.5, "Early Stopping Validation Disabled", ha="center", va="center")
+        
+    # ۳. نمودار میله‌ای مقایسه عملکرد در آموزش و آزمون
+    metrics = ["Train Acc", "Test Top-1", "Test Top-2", "Test Top-3", "Test Top-5"]
+    values = [train_acc, test_acc, top2_acc, top3_acc, top5_acc]
+    colors = ["#3498db", "#e74c3c", "#e67e22", "#2ecc71", "#1abc9c"]
+    
+    bars = axes[2].bar(metrics, values, color=colors, width=0.55, edgecolor="black", linewidth=0.8)
+    axes[2].set_ylim(0, 115)
+    axes[2].set_title("Algorithm Performance: Train vs Unseen Test Data", fontsize=11, fontweight="bold")
+    axes[2].set_ylabel("Accuracy (%)", fontsize=10)
+    axes[2].grid(axis="y", linestyle="--", alpha=0.6)
+    
+    for bar in bars:
+        yval = bar.get_height()
+        axes[2].text(
+            bar.get_x() + bar.get_width() / 2.0, yval + 1.5,
+            f"{yval:.1f}%", ha="center", va="bottom", fontsize=10, fontweight="bold"
+        )
+        
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300)
+    print(f"📊 نمودار عملکرد الگوریتم با موفقیت ذخیره شد: {output_path}")
+    
+    return train_acc, test_acc, top3_acc
 
 
-# ==============================================================================
-# ۴. معماری و آموزش شبکه عصبی
-# ==============================================================================
-
-def train_neural_network(X: np.ndarray, y: np.ndarray) -> MLPClassifier:
-    """
-    آموزش شبکه عصبی MLP برای نگاشت مستقیم داده ورودی به سطرهای پایگاه‌داده:
-    - ورودی: ۷۰ گره (۳۵ داده نرمال‌شده + ۳۵ ماسک اعتبارسنجی)
-    - لایه‌های مخفی: لایه اول ۲۵۶ نورون، لایه دوم ۱۲۸ نورون با فعال‌ساز ReLU
-    - خروجی: ۱۰۰ نورون با تابع Softmax (احتمال تعلق به هر یک از ۱۰۰ سطر)
-    - بهینه‌ساز: Adam همراه با Early Stopping جهت جلوگیری از بیش‌برازش
-    """
+def train_neural_network(X: np.ndarray, y: np.ndarray, model_save_path: str = "trained_model.joblib") -> MLPClassifier:
+    """آموزش شبکه عصبی، ارزیابی، رسم نمودارها و ذخیره وزن‌ها"""
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.20, random_state=42, stratify=y
     )
@@ -191,54 +226,46 @@ def train_neural_network(X: np.ndarray, y: np.ndarray) -> MLPClassifier:
         activation="relu",
         solver="adam",
         learning_rate_init=0.001,
-        max_iter=350,
+        max_iter=300,
         random_state=42,
         early_stopping=True,
         validation_fraction=0.10,
         n_iter_no_change=15
     )
     
-    print("⏳ در حال آموزش شبکه عصبی عمیق روی ورودی‌های طول متغیر (Padding + Masking)...")
+    print("⏳ در حال آموزش شبکه عصبی عمیق روی ۸۰۰۰ نمونه (با حذف مستقل ۳۰٪ اعضا)...")
     model.fit(X_train, y_train)
     
-    # ارزیابی
-    train_acc = accuracy_score(y_train, model.predict(X_train))
-    test_acc = accuracy_score(y_test, model.predict(X_test))
+    # رسم و ذخیره نمودارهای ارزیابی
+    train_acc, test_acc, top3_acc = plot_performance_evaluation(model, X_train, y_train, X_test, y_test)
     
-    test_probs = model.predict_proba(X_test)
-    top3_acc = np.mean([y_test[i] in np.argsort(test_probs[i])[-3:] for i in range(len(y_test))])
+    print("\n📊 نتایج ارزیابی عملکرد شبکه عصبی:")
+    print("-" * 55)
+    print(f"✅ دقت روی داده‌های آموزش (Train Accuracy)     : {train_acc:.2f}%")
+    print(f"✅ دقت پیش‌بینی دقیق (Test Top-1 Accuracy)    : {test_acc:.2f}%")
+    print(f"✅ دقت در ۳ سطر برتر (Test Top-3 Accuracy)    : {top3_acc:.2f}%")
+    print("-" * 55)
     
-    print("\n📊 نتایج ارزیابی شبکه عصبی روی داده‌های آزمون (داده‌های کاملاً جدید):")
-    print("-" * 55)
-    print(f"✅ دقت آموزش (Train Accuracy)     : {train_acc * 100:.2f}%")
-    print(f"✅ دقت پیش‌بینی دقیق (Top-1 Accuracy): {test_acc * 100:.2f}%")
-    print(f"✅ دقت در ۳ سطر برتر (Top-3 Accuracy): {top3_acc * 100:.2f}%")
-    print("-" * 55)
+    # ذخیره وزن‌های مدل آموزش‌دیده
+    joblib.dump(model, model_save_path)
+    print(f"💾 وزن‌های مدل آموزش‌دیده با موفقیت ذخیره شد: {model_save_path}")
+    print("   (کاربر/کارفرما می‌تواند با اسکریپت inference.py بدون نیاز به ترین مجدد، در کسری از ثانیه خروجی بگیرد)")
     
     return model
 
 
 # ==============================================================================
-# ۵. استنتاج و استخراج ۳ سطر با بیشترین شباهت (بدون سرچ در پایگاه‌داده)
+# ۵. استنتاج و استخراج ۳ سطر با بیشترین شباهت
 # ==============================================================================
 
 def find_top3(query: Dict, df: pd.DataFrame, model: MLPClassifier) -> List[Dict[str, Any]]:
-    """
-    استخراج ۳ سطر با بیشترین شباهت از طریق یک‌بار ارسال داده ورودی به شبکه عصبی:
-    هیچ‌گونه حلقه سرچ یا مقایسه دستی با پایگاه‌داده انجام نمی‌شود!
-    شبکه عصبی مستقیماً احتمال تعلق به تک‌تک ۱۰۰ سطر را در قالب توزیع Softmax برمی‌گرداند.
-    """
+    """استخراج ۳ سطر برتر با بیشترین شباهت از طریق خروجی Softmax شبکه"""
     q1 = parse_query_points(query, "Feature1")
     q2 = parse_query_points(query, "Feature2")
     q3 = parse_query_points(query, "Feature3")
     
-    # تبدیل داده ورودی به بردار ۷۰ بعدی (مقادیر + ماسک)
     x_input = encode_variable_length_query(q1, q2, q3)
-    
-    # ارسال به شبکه عصبی (One-pass Inference)
     probs = model.predict_proba([x_input])[0]
-    
-    # استخراج ۳ اندیس با بیشترین احتمال
     top3_indices = np.argsort(probs)[-3:][::-1]
     
     results = []
@@ -252,7 +279,6 @@ def find_top3(query: Dict, df: pd.DataFrame, model: MLPClassifier) -> List[Dict[
             "Feature2": row["Feature2"],
             "Feature3": row["Feature3"],
         })
-    
     return results
 
 
@@ -262,53 +288,34 @@ def find_top3(query: Dict, df: pd.DataFrame, model: MLPClassifier) -> List[Dict[
 
 if __name__ == "__main__":
     print("=" * 75)
-    print("🚀 قدم ۳: شباهت‌یابی مستقیم با شبکه عصبی بر روی داده‌های با طول متغیر")
-    print("   (رویکرد Padding + Masking بدون استفاده از پارامترهای آماری یا سرچ دستی)")
+    print("🚀 قدم ۳: آموزش شبکه عصبی و ثبت وزن‌ها (همراه با نمودارهای ۳ بعدی و دقت)")
     print("=" * 75)
     
-    # بارگذاری پایگاه‌داده
-    print("\n📂 بارگذاری پایگاه‌داده...")
+    # ۱. بارگذاری پایگاه‌داده
     df = pd.read_pickle("database.pkl")
-    print(f"   تعداد سطرهای موجود در پایگاه‌داده: {len(df)}")
+    print(f"📂 پایگاه‌داده با موفقیت بارگذاری شد ({len(df)} سطر).")
     
-    # تولید داده آموزشی
-    print("\n📊 تولید داده‌های آموزشی (۶۰ نمونه برای هر یک از ۱۰۰ سطر = ۶۰۰۰ نمونه)...")
-    X, y = generate_training_data(df, samples_per_class=60)
-    print(f"   ابعاد ماتریس ورودی X: {X.shape} (شامل ۳۵ داده نرمال‌شده + ۳۵ ماسک) | برچسب‌ها y: {y.shape}")
+    # ۲. تولید داده آموزشی
+    print("\n📊 تولید داده‌های آموزشی با حذف مستقل ۳۰٪ برای هر یک از اعضا...")
+    X, y = generate_training_data(df, samples_per_class=80)
+    print(f"   ابعاد ماتریس ورودی X: {X.shape} | برچسب‌ها y: {y.shape}")
     
-    # آموزش شبکه عصبی
-    model = train_neural_network(X, y)
+    # ۳. آموزش شبکه و ذخیره وزن‌ها و رسم نمودار
+    model = train_neural_network(X, y, model_save_path="trained_model.joblib")
     
-    # بارگذاری داده دریافتی (query.json)
-    print("\n📥 بارگذاری داده ورودی به شبکه (query.json)...")
+    # ۴. بارگذاری query.json و تست استنتاج
     with open("query.json", "r", encoding="utf-8") as f:
         query = json.load(f)
-    
-    print(f"   شماره سطر منبع اصلی کوئری: سطر {query.get('source_row_id')}")
-    print(f"   داده‌های عددی Feature1   : {str(query.get('Feature1'))[:75]}...")
-    print(f"   داده‌های عددی Feature2   : {str(query.get('Feature2'))[:75]}...")
-    print(f"   داده‌های عددی Feature3   : {str(query.get('Feature3'))}")
-    
-    # استنتاج مستقیم توسط شبکه عصبی
-    print("\n🔍 در حال محاسبه احتمالات خروجی شبکه عصبی (توزیع Softmax روی ۱۰۰ کلاس)...")
+        
+    print(f"\n📥 تست استنتاج روی query.json (سطر مبدأ اصلی: {query.get('source_row_id')})...")
     top3 = find_top3(query, df, model)
     
-    # نمایش نتایج
     print("\n" + "=" * 75)
-    print("🏆 ۳ سطر برتر پیش‌بینی‌شده توسط شبکه عصبی به همراه احتمال شباهت:")
+    print("🏆 ۳ سطر برتر پیش‌بینی‌شده توسط شبکه عصبی:")
     print("=" * 75)
-    
     for item in top3:
-        print(f"\n🥇 رتبه {item['rank']}: سطر شماره {item['row_id']}")
-        print(f"   درصد احتمال شباهت (Softmax Probability): {item['probability'] * 100:.2f}%")
-        print(f"   بازه‌های Feature1 در پایگاه‌داده: {item['Feature1'][:75]}...")
-        print(f"   بازه‌های Feature2 در پایگاه‌داده: {item['Feature2'][:75]}...")
-        print(f"   بازه‌های Feature3 در پایگاه‌داده: {item['Feature3']}")
-    
-    # ذخیره نتایج در فایل JSON
+        print(f"🥇 رتبه {item['rank']}: سطر شماره {item['row_id']:<3} | احتمال شباهت: {item['probability']*100:.2f}%")
+        
     with open("top3_results.json", "w", encoding="utf-8") as f:
         json.dump(top3, f, ensure_ascii=False, indent=2)
-    
-    print("\n" + "=" * 75)
-    print("✅ نتایج نهایی با موفقیت در فایل top3_results.json ذخیره گردید.")
-    print("=" * 75)
+    print("\n✅ نتایج در فایل top3_results.json ذخیره شد.")

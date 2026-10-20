@@ -1,8 +1,8 @@
 """
 تولید داده دریافتی (Query) - قدم ۲
-مطابق با مشخصات پروژه کارآموزی و بازخورد کارفرما:
+مطابق با مشخصات پروژه کارآموزی و اصلاحیه جدید کارفرما:
 - داده‌های ورودی به شبکه نباید بازه‌ای باشند، بلکه باید به صورت مقادیر عددی (نقاط) از درون بازه‌های پایگاه‌داده انتخاب گردند.
-- با احتمال ۳۰٪ ممکن است یکی از اعضای بردار ویژگی دریافت نشود (حذف شود).
+- هر یک از اعضای بردار ویژگی به صورت مستقل به احتمال ۳۰٪ می‌تواند حضور نداشته باشد (Independent Dropout).
 - هر عدد دارای ۱٪ خطای تصادفی نسبت به مقدار واقعی است.
 """
 
@@ -46,25 +46,23 @@ def apply_1_percent_error(value: float, decimal_places: int = 4) -> float:
     return round(float(value + error), decimal_places)
 
 
-def remove_random_member(values: List[float], prob: float = 0.30) -> List[float]:
+def apply_independent_dropout(values: List[float], drop_prob: float = 0.30) -> List[float]:
     """
-    با احتمال ۳۰٪، یکی از اعضای بردار ویژگی دریافت نمی‌شود (مطابق بند ۲ PDF)
+    هر یک از اعضای بردار ویژگی به صورت مستقل به احتمال ۳۰٪ می‌تواند حضور نداشته باشد
+    (آزمون برنولی مستقل برای هر عضو مطابق اصلاحیه جدید کارفرما)
     """
-    if len(values) <= 1:
-        return values  # اگر فقط یک عضو داشته باشیم، آن را حذف نمی‌کنیم
-    
-    if np.random.random() < prob:
-        drop_idx = np.random.randint(0, len(values))
-        values = values[:drop_idx] + values[drop_idx + 1:]
-    
-    return values
+    kept = [v for v in values if np.random.random() >= drop_prob]
+    # در صورتی که تصادفاً همه اعضا حذف شوند، حداقل یک عضو را نگه می‌داریم تا بردار خالی نشود
+    if not kept and values:
+        kept = [values[np.random.randint(0, len(values))]]
+    return kept
 
 
 def generate_feature_points(interval_str: str, decimal_places: int = 4) -> Tuple[List[float], str]:
     """
     تولید بردار مقادیر عددی برای یک ویژگی از روی بازه‌های موجود در پایگاه‌داده:
     ۱. انتخاب یک عدد تصادفی از درون هر بازه
-    ۲. احتمال ۳۰٪ حذف یکی از اعضا
+    ۲. احتمال ۳۰٪ عدم حضور مستقل برای هر عضو
     ۳. اعمال خطای ۱٪ روی هر مقدار
     """
     intervals = parse_intervals(interval_str)
@@ -74,8 +72,8 @@ def generate_feature_points(interval_str: str, decimal_places: int = 4) -> Tuple
     # ۱. انتخاب تصادفی عدد از درون بازه
     points = [sample_point_from_interval(s, e, decimal_places) for s, e in intervals]
     
-    # ۲. احتمال ۳۰٪ حذف یکی از اعضای بردار
-    points = remove_random_member(points, prob=0.30)
+    # ۲. احتمال مستقل ۳۰٪ عدم حضور برای هر یک از اعضا
+    points = apply_independent_dropout(points, drop_prob=0.30)
     
     # ۳. اعمال ۱٪ نویز به هر عدد
     noisy_points = [apply_1_percent_error(p, decimal_places) for p in points]
