@@ -1,0 +1,19 @@
+{
+  "source_row_id": -1,
+  "description": "Out-of-Distribution Synthetic Query",
+  "Feature1": "15250.45, 18340.20",
+  "Feature2": "5200.10, 8900.50, 12400.00",
+  "Feature3": "2500.80",
+  "Feature1_values": [
+    15250.45,
+    18340.2
+  ],
+  "Feature2_values": [
+    5200.1,
+    8900.5,
+    12400.0
+  ],
+  "Feature3_values": [
+    2500.8
+  ]
+}

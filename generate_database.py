@@ -1,6 +1,6 @@
 """
 تولید پایگاه‌داده کارآموزی - قدم ۱
-مطابق مشخصات PDF
+مطابق مشخصات PDF و پارامترهای قابل تنظیم در config.txt
 
 پایگاه‌داده: ۱۰۰ سطر × ۳ ویژگی (Feature1, Feature2, Feature3)
 هر ویژگی یک بردار از بازه‌هاست.
@@ -10,8 +10,9 @@ import numpy as np
 import pandas as pd
 from typing import List, Tuple
 import json
+from config_utils import CONFIG
 
-np.random.seed(42)  # برای تکرارپذیری نتایج
+np.random.seed(CONFIG["RANDOM_SEED"])  # برای تکرارپذیری نتایج
 
 
 def generate_intervals(
@@ -22,38 +23,24 @@ def generate_intervals(
     value_max: float,
     decimal_places: int = 2
 ) -> List[Tuple[float, float]]:
-    """
-    تولید یک بردار از بازه‌ها
-    
-    پارامترها:
-        n_min, n_max: تعداد اعضا (تصادفی بین این دو)
-        width_max: حداکثر عرض بازه
-        value_min, value_max: محدوده اعداد
-        decimal_places: تعداد رقم اعشار
-    """
+    """تولید یک بردار از بازه‌ها با پارامترهای مشخص"""
     n = np.random.randint(n_min, n_max + 1)
     intervals = []
     
     for _ in range(n):
-        # انتخاب نقطه شروع در محدوده مجاز
-        # اطمینان از اینکه end از value_max بیشتر نشود
         start = np.random.uniform(value_min, value_max - width_max)
         width = np.random.uniform(0, width_max)
         end = start + width
         
-        # گرد کردن
         start = round(start, decimal_places)
         end = round(end, decimal_places)
         
-        # اطمینان از start <= end
         if start > end:
             start, end = end, start
             
         intervals.append((start, end))
     
-    # مرتب‌سازی بر اساس شروع بازه (اختیاری ولی تمیزتر است)
     intervals.sort(key=lambda x: x[0])
-    
     return intervals
 
 
@@ -64,17 +51,13 @@ def intervals_to_string(intervals: List[Tuple[float, float]]) -> str:
 
 def calculate_overlap_ratio(intervals1: List[Tuple[float, float]], 
                             intervals2: List[Tuple[float, float]]) -> float:
-    """
-    محاسبه نسبت همپوشانی تقریبی بین دو مجموعه بازه
-    (برای کنترل همپوشانی ۳۰٪)
-    """
+    """محاسبه نسبت همپوشانی تقریبی بین دو مجموعه بازه"""
     if not intervals1 or not intervals2:
         return 0.0
     
     def total_length(intervals):
         return sum(end - start for start, end in intervals)
     
-    # محاسبه همپوشانی زوجی
     overlap_len = 0.0
     for s1, e1 in intervals1:
         for s2, e2 in intervals2:
@@ -89,21 +72,22 @@ def calculate_overlap_ratio(intervals1: List[Tuple[float, float]],
     if len1 + len2 == 0:
         return 0.0
     
-    # نسبت همپوشانی نسبت به میانگین طول‌ها
     return overlap_len / ((len1 + len2) / 2)
 
 
-def generate_database(n_rows: int = 100, max_overlap: float = 0.30) -> pd.DataFrame:
-    """
-    تولید کامل پایگاه‌داده با کنترل همپوشانی تقریبی
-    """
+def generate_database(n_rows: int = None, max_overlap: float = None) -> pd.DataFrame:
+    """تولید کامل پایگاه‌داده با استفاده از پارامترهای config.txt"""
+    if n_rows is None:
+        n_rows = CONFIG["DATABASE_ROWS"]
+    if max_overlap is None:
+        max_overlap = CONFIG["MAX_OVERLAP_RATIO"]
+        
     data = {
         "Feature1": [],
         "Feature2": [],
         "Feature3": []
     }
     
-    # ذخیره بازه‌ها به صورت لیست برای کنترل همپوشانی
     all_intervals = {
         "Feature1": [],
         "Feature2": [],
@@ -111,47 +95,44 @@ def generate_database(n_rows: int = 100, max_overlap: float = 0.30) -> pd.DataFr
     }
     
     for i in range(n_rows):
-        # ---------- Feature1 ----------
-        # تعداد: ۱–۱۰ | عرض: ۰–۵ | محدوده: ۱۰۰۰–۱۰۰۰۰
+        # Feature 1
         f1 = generate_intervals(
-            n_min=1, n_max=10,
-            width_max=5.0,
-            value_min=1000.0,
-            value_max=10000.0,
-            decimal_places=2
+            n_min=CONFIG["FEATURE1_MIN_INTERVALS"],
+            n_max=CONFIG["FEATURE1_MAX_INTERVALS"],
+            width_max=CONFIG["FEATURE1_MAX_WIDTH"],
+            value_min=CONFIG["FEATURE1_MIN_VAL"],
+            value_max=CONFIG["FEATURE1_MAX_VAL"],
+            decimal_places=CONFIG["FEATURE1_DECIMALS"]
         )
         
-        # ---------- Feature2 ----------
-        # تعداد: ۱–۲۰ | عرض: ۰–۱۰ | محدوده: ۲۰۰۰۰–۱۰۰۰۰۰
+        # Feature 2
         f2 = generate_intervals(
-            n_min=1, n_max=20,
-            width_max=10.0,
-            value_min=20000.0,
-            value_max=100000.0,
-            decimal_places=2
+            n_min=CONFIG["FEATURE2_MIN_INTERVALS"],
+            n_max=CONFIG["FEATURE2_MAX_INTERVALS"],
+            width_max=CONFIG["FEATURE2_MAX_WIDTH"],
+            value_min=CONFIG["FEATURE2_MIN_VAL"],
+            value_max=CONFIG["FEATURE2_MAX_VAL"],
+            decimal_places=CONFIG["FEATURE2_DECIMALS"]
         )
         
-        # ---------- Feature3 ----------
-        # تعداد: ۱–۵ | عرض: ۰–۱ | محدوده: ۰.۱–۱۰۰۰
+        # Feature 3
         f3 = generate_intervals(
-            n_min=1, n_max=5,
-            width_max=1.0,
-            value_min=0.1,
-            value_max=1000.0,
-            decimal_places=3
+            n_min=CONFIG["FEATURE3_MIN_INTERVALS"],
+            n_max=CONFIG["FEATURE3_MAX_INTERVALS"],
+            width_max=CONFIG["FEATURE3_MAX_WIDTH"],
+            value_min=CONFIG["FEATURE3_MIN_VAL"],
+            value_max=CONFIG["FEATURE3_MAX_VAL"],
+            decimal_places=CONFIG["FEATURE3_DECIMALS"]
         )
         
-        # کنترل همپوشانی تقریبی با سطرهای قبلی (اختیاری ولی مطابق PDF)
-        # اگر همپوشانی خیلی زیاد بود، کمی جابه‌جا می‌کنیم
+        # کنترل همپوشانی با سطرهای قبلی
         for feat_name, intervals in [("Feature1", f1), ("Feature2", f2), ("Feature3", f3)]:
             for prev in all_intervals[feat_name]:
                 overlap = calculate_overlap_ratio(intervals, prev)
                 if overlap > max_overlap:
-                    # کمی شیفت تصادفی برای کاهش همپوشانی
                     shift = np.random.uniform(-2, 2)
                     intervals = [(round(s + shift, 3), round(e + shift, 3)) for s, e in intervals]
         
-        # ذخیره
         all_intervals["Feature1"].append(f1)
         all_intervals["Feature2"].append(f2)
         all_intervals["Feature3"].append(f3)
@@ -166,20 +147,20 @@ def generate_database(n_rows: int = 100, max_overlap: float = 0.30) -> pd.DataFr
 
 
 def save_database(df: pd.DataFrame, 
-                  csv_path: str = "database.csv",
-                  json_path: str = "database.json",
-                  pickle_path: str = "database.pkl"):
+                  csv_path: str = None,
+                  json_path: str = None,
+                  pickle_path: str = None):
     """ذخیره پایگاه‌داده در فرمت‌های مختلف"""
+    if csv_path is None: csv_path = CONFIG["DATABASE_CSV"]
+    if json_path is None: json_path = CONFIG["DATABASE_JSON"]
+    if pickle_path is None: pickle_path = CONFIG["DATABASE_PKL"]
     
-    # CSV (خوانا برای انسان)
     df.to_csv(csv_path, encoding="utf-8-sig")
     print(f"✅ ذخیره شد: {csv_path}")
     
-    # JSON (برای استفاده در برنامه‌های دیگر)
     df.to_json(json_path, orient="records", force_ascii=False, indent=2)
     print(f"✅ ذخیره شد: {json_path}")
     
-    # Pickle (سریع‌ترین برای پایتون)
     df.to_pickle(pickle_path)
     print(f"✅ ذخیره شد: {pickle_path}")
 
@@ -187,7 +168,7 @@ def save_database(df: pd.DataFrame,
 def preview_database(df: pd.DataFrame, n: int = 5):
     """نمایش چند سطر اول پایگاه‌داده"""
     print("\n" + "="*80)
-    print(f"نمونه {n} سطر اول پایگاه‌داده (از مجموع {len(df)} سطر):")
+    print(f"نمونه {n} سطر اول پایگاه‌داده (از مجموع {len(df)} سطر خوانده‌شده از config.txt):")
     print("="*80)
     
     for idx, row in df.head(n).iterrows():
@@ -206,18 +187,10 @@ def preview_database(df: pd.DataFrame, n: int = 5):
 
 
 if __name__ == "__main__":
-    print("🚀 شروع تولید پایگاه‌داده ۱۰۰ سطری...")
+    print(f"🚀 شروع تولید پایگاه‌داده {CONFIG['DATABASE_ROWS']} سطری با تنظیمات config.txt...")
     
-    db = generate_database(n_rows=100, max_overlap=0.30)
-    
+    db = generate_database()
     preview_database(db, n=5)
-    
-    save_database(
-        db,
-        csv_path="database.csv",
-        json_path="database.json",
-        pickle_path="database.pkl"
-    )
+    save_database(db)
     
     print("\n✅ پایگاه‌داده با موفقیت ساخته شد!")
-    print("فایل‌های خروجی در پوشه artifacts ذخیره شدند.")

@@ -1,0 +1,60 @@
+# ==============================================================================
+# فایل پیکربندی پارامترهای ثابت پروژه کارآموزی (config.txt)
+# تمام پارامترها و ثوابت کدها از این فایل خوانده می‌شوند و قابل تنظیم هستند
+# ==============================================================================
+
+# --- مشخصات پایگاه‌داده ---
+DATABASE_ROWS = 100
+MAX_OVERLAP_RATIO = 0.30
+
+# --- مشخصات ویژگی ۱ (Feature 1) ---
+FEATURE1_MIN_VAL = 1000.0
+FEATURE1_MAX_VAL = 10000.0
+FEATURE1_MIN_INTERVALS = 1
+FEATURE1_MAX_INTERVALS = 10
+FEATURE1_MAX_WIDTH = 5.0
+FEATURE1_DECIMALS = 2
+
+# --- مشخصات ویژگی ۲ (Feature 2) ---
+FEATURE2_MIN_VAL = 20000.0
+FEATURE2_MAX_VAL = 100000.0
+FEATURE2_MIN_INTERVALS = 1
+FEATURE2_MAX_INTERVALS = 20
+FEATURE2_MAX_WIDTH = 10.0
+FEATURE2_DECIMALS = 2
+
+# --- مشخصات ویژگی ۳ (Feature 3) ---
+FEATURE3_MIN_VAL = 0.1
+FEATURE3_MAX_VAL = 1000.0
+FEATURE3_MIN_INTERVALS = 1
+FEATURE3_MAX_INTERVALS = 5
+FEATURE3_MAX_WIDTH = 1.0
+FEATURE3_DECIMALS = 3
+
+# --- تنظیمات تولید داده دریافتی (Query) ---
+DROPOUT_PROB = 0.30
+NOISE_RATE = 0.01
+
+# --- تنظیمات آموزش شبکه عصبی ---
+SAMPLES_PER_CLASS = 80
+HIDDEN_LAYER_1 = 256
+HIDDEN_LAYER_2 = 128
+LEARNING_RATE = 0.001
+MAX_ITER = 300
+RANDOM_SEED = 42
+
+# --- آستانه حداقل شباهت جهت تشخیص عدم وجود در پایگاه‌داده (بند ۴ کارفرما) ---
+SIMILARITY_THRESHOLD = 0.30
+
+# --- مسیر و نام فایل‌ها ---
+DATABASE_PKL = database.pkl
+DATABASE_CSV = database.csv
+DATABASE_JSON = database.json
+QUERY_JSON = query.json
+QUERY_TXT = query.txt
+MODEL_SAVE_PATH = trained_model.joblib
+TOP3_RESULTS_JSON = top3_results.json
+DATABASE_3D_PLOT = database_3d_visualization.png
+ACCURACY_PLOT = accuracy_evaluation_plot.png
+ARCHITECTURE_DIAGRAM = network_architecture_diagram.png
+
